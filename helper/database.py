@@ -1,52 +1,63 @@
-import motor.motor_asyncio
-from config import DB_URL, DB_NAME
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, scoped_session
 
-class Database:
+import os
 
-    def __init__(self, uri, database_name):
-        self._client = motor.motor_asyncio.AsyncIOMotorClient(uri)
-        self.db = self._client[database_name]
-        self.col = self.db.user
+import threading
+import asyncio
 
-    def new_user(self, id):
-        return dict(
-            _id=int(id),                                   
-            file_id=None,
-            caption=None
-        )
+from sqlalchemy import Column, Integer, Boolean, String, ForeignKey, UniqueConstraint, func
 
-    async def add_user(self, id):
-        user = self.new_user(id)
-        await self.col.insert_one(user)
 
-    async def is_user_exist(self, id):
-        user = await self.col.find_one({'_id': int(id)})
-        return bool(user)
+from sample_config import Config
 
-    async def total_users_count(self):
-        count = await self.col.count_documents({})
-        return count
 
-    async def get_all_users(self):
-        all_users = self.col.find({})
-        return all_users
+def start() -> scoped_session:
+    engine = create_engine(Config.DB_URI, client_encoding="utf8")
+    BASE.metadata.bind = engine
+    BASE.metadata.create_all(engine)
+    return scoped_session(sessionmaker(bind=engine, autoflush=False))
 
-    async def delete_user(self, user_id):
-        await self.col.delete_many({'_id': int(user_id)})
+
+BASE = declarative_base()
+SESSION = start()
+
+INSERTION_LOCK = threading.RLock()
+
+class Thumbnail(BASE):
+    __tablename__ = "thumbnail"
+    id = Column(Integer, primary_key=True)
+    msg_id = Column(Integer)
     
-    async def set_thumbnail(self, id, file_id):
-        await self.col.update_one({'_id': int(id)}, {'$set': {'file_id': file_id}})
+    def __init__(self, id, msg_id):
+        self.id = id
+        self.msg_id = msg_id
 
-    async def get_thumbnail(self, id):
-        user = await self.col.find_one({'_id': int(id)})
-        return user.get('file_id', None)
+Thumbnail.__table__.create(checkfirst=True)
 
-    async def set_caption(self, id, caption):
-        await self.col.update_one({'_id': int(id)}, {'$set': {'caption': caption}})
+async def df_thumb(id, msg_id):
+    with INSERTION_LOCK:
+        msg = SESSION.query(Thumbnail).get(id)
+        if not msg:
+            msg = Thumbnail(id, msg_id)
+            SESSION.add(msg)
+            SESSION.flush()
+        else:
+            SESSION.delete(msg)
+            file = Thumbnail(id, msg_id)
+            SESSION.add(file)
+        SESSION.commit()
 
-    async def get_caption(self, id):
-        user = await self.col.find_one({'_id': int(id)})
-        return user.get('caption', None)
+async def del_thumb(id):
+    with INSERTION_LOCK:
+        msg = SESSION.query(Thumbnail).get(id)
+        SESSION.delete(msg)
+        SESSION.commit()
 
-
-db = Database(DB_URL, DB_NAME)
+async def thumb(id):
+    try:
+        t = SESSION.query(Thumbnail).get(id)
+        return t
+    finally:
+        SESSION.close()
